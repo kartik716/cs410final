@@ -31,22 +31,34 @@ def load_model(path: str, model):
 
 class ValueNetwork(nn.Module):
     def __init__(self, input_size):
-      super(ValueNetwork, self).__init__()
-
-      # TODO: What should the output size of a Value function be?
-      output_size = 0
-
-      # TODO: Add more layers, non-linear functions, etc.
-      self.linear = nn.Linear(input_size, output_size)
+        super(ValueNetwork, self).__init__()
+        
+        # Output size: 1 for value prediction (scalar between -1 and 1)
+        output_size = 1
+        
+        # Hidden layers for better representation learning
+        hidden_size1 = 128
+        hidden_size2 = 64
+        hidden_size3 = 32
+        
+        self.network = nn.Sequential(
+            nn.Linear(input_size, hidden_size1),
+            nn.ReLU(),
+            nn.Linear(hidden_size1, hidden_size2),
+            nn.ReLU(),
+            nn.Linear(hidden_size2, hidden_size3),
+            nn.ReLU(),
+            nn.Linear(hidden_size3, output_size),
+            nn.Tanh()  # Tanh to output values between -1 and 1
+        )
 
     def forward(self, x):
-      """
-      Run forward pass of network
+        """
+        Run forward pass of network
 
-      Input:
-        x: input to network
-      Output:
-        output of network
-      """
-      # TODO: Update as more layers are added
-      return self.linear(x)
+        Input:
+            x: input to network
+        Output:
+            output of network
+        """
+        return self.network(x)
