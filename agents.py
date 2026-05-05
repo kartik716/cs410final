@@ -303,7 +303,7 @@ class IterativeDeepeningAgent(GameAgent):
         returned.
         """
         # Reserve a small safety margin so we never exceed the hard limit.
-        deadline = time.time() + time_limit * 0.9
+        deadline = time.time() + time_limit * 0.85
 
         is_maximizing = (game_state.player_to_move() == MAXIMIZER)
 
@@ -422,12 +422,10 @@ class MCTSAgent(GameAgent):
         return curr
 
     def expand(self, leaf: MCTSNode) -> List[MCTSNode]:
-        """
-        EXPAND: add all legal children of *leaf* to the tree and return them.
-        If *leaf* is terminal, return [leaf] so we can still backpropagate.
-        """
+        """EXPAND: add all legal children of *leaf* to the tree."""
+        # FIX: Return empty list for terminal nodes (not [leaf])
         if leaf.is_terminal():
-            return [leaf]
+            return []  # ← Change this from [leaf] to []
 
         actions = self.search_problem.get_available_actions(leaf.state)
         random.shuffle(actions)
@@ -689,7 +687,7 @@ class FinalAgent(GameAgent):
 
     def _expand(self, leaf: MCTSNode) -> List[MCTSNode]:
         if leaf.is_terminal():
-            return [leaf]
+            return []
         actions = self.search_problem.get_available_actions(leaf.state)
         random.shuffle(actions)
         children = []
