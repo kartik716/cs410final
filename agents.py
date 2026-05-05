@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from go_search_problem import GoProblem, GoState, Action, HeuristicGoProblem
-from heuristic_go_problems import GoProblemSimpleHeuristic
+from heuristic_go_problems import GoProblemSimpleHeuristic, GoProblemLearnedHeuristic
 from models import ValueNetwork, load_model
 
 MAXIMIZER = 0
@@ -16,15 +16,15 @@ MIMIZER = 1
 
 class GameAgent(ABC):
     """Abstract base class for all Go game agents."""
-    
+
     @abstractmethod
     def get_move(self, state: GoState, time_limit: float) -> Action:
         """Get the best move for the given state within the time limit.
-        
+
         Args:
             state: Current game state
             time_limit: Maximum time in seconds to spend on this move
-            
+
         Returns:
             Action index representing the chosen move
         """
@@ -102,7 +102,7 @@ class GreedyAgent(GameAgent):
 
 
 #############################################
-# 
+#
 #
 # Part 1: Basic Adversarial Search Algorithms
 #
@@ -118,9 +118,8 @@ class MinimaxAgent(GameAgent):
     def minimax(self, state, depth, is_maximizing):
         """Recursive minimax algorithm with depth cutoff."""
         if depth == 0 or self.search_problem.is_terminal_state(state):
-            # Return heuristic value from current player's perspective
             return self.search_problem.heuristic(state, state.player_to_move())
-        
+
         if is_maximizing:
             max_eval = -float('inf')
             actions = self.search_problem.get_available_actions(state)
@@ -144,20 +143,20 @@ class MinimaxAgent(GameAgent):
         """
         is_maximizing = (game_state.player_to_move() == MAXIMIZER)
         best_action = None
-        
+
         if is_maximizing:
             best_value = -float('inf')
         else:
             best_value = float('inf')
-        
+
         actions = self.search_problem.get_available_actions(game_state)
         random.shuffle(actions)
-        
+
         for action in actions:
             new_state = self.search_problem.transition(game_state, action)
             # Depth-1 recursion because we already made one move
             value = self.minimax(new_state, self.depth - 1, not is_maximizing)
-            
+
             if is_maximizing:
                 if value > best_value:
                     best_value = value
@@ -166,7 +165,7 @@ class MinimaxAgent(GameAgent):
                 if value < best_value:
                     best_value = value
                     best_action = action
-        
+
         return best_action
 
     def __str__(self):
@@ -183,7 +182,7 @@ class AlphaBetaAgent(GameAgent):
         """Recursive alpha-beta pruning algorithm."""
         if depth == 0 or self.search_problem.is_terminal_state(state):
             return self.search_problem.heuristic(state, state.player_to_move())
-        
+
         if is_maximizing:
             max_eval = -float('inf')
             actions = self.search_problem.get_available_actions(state)
@@ -213,22 +212,22 @@ class AlphaBetaAgent(GameAgent):
         """
         is_maximizing = (game_state.player_to_move() == MAXIMIZER)
         best_action = None
-        
+
         if is_maximizing:
             best_value = -float('inf')
         else:
             best_value = float('inf')
-        
+
         actions = self.search_problem.get_available_actions(game_state)
         random.shuffle(actions)
-        
+
         alpha = -float('inf')
         beta = float('inf')
-        
+
         for action in actions:
             new_state = self.search_problem.transition(game_state, action)
             value = self.alphabeta(new_state, self.depth - 1, alpha, beta, not is_maximizing)
-            
+
             if is_maximizing:
                 if value > best_value:
                     best_value = value
@@ -239,7 +238,7 @@ class AlphaBetaAgent(GameAgent):
                     best_value = value
                     best_action = action
                 beta = min(beta, value)
-        
+
         return best_action
 
     def __str__(self):
@@ -248,247 +247,312 @@ class AlphaBetaAgent(GameAgent):
 
 ################################################
 #
-# Part 2: Advanced Adversarial Search Algorithms
+# Part 2A: Iterative Deepening Search
 #
 ################################################
+
+class _Timeout(Exception):
+    """Internal sentinel raised when the search deadline is reached."""
+    pass
+
 
 class IterativeDeepeningAgent(GameAgent):
     def __init__(self, cutoff_time=1, search_problem=GoProblemSimpleHeuristic()):
         super().__init__()
         self.cutoff_time = cutoff_time
         self.search_problem = search_problem
-    
-    def alphabeta_with_timeout(self, state, depth, alpha, beta, is_maximizing, start_time, time_limit):
-        """Alpha-beta with time checking."""
+
+    def _alphabeta(self, state, depth, alpha, beta, is_maximizing, deadline):
+        """Alpha-beta search that raises _Timeout when the deadline is reached."""
+        if time.time() >= deadline:
+            raise _Timeout()
+
         if depth == 0 or self.search_problem.is_terminal_state(state):
             return self.search_problem.heuristic(state, state.player_to_move())
-        
+
+        actions = self.search_problem.get_available_actions(state)
+
         if is_maximizing:
-            max_eval = -float('inf')
-            actions = self.search_problem.get_available_actions(state)
+            best = -float('inf')
             for action in actions:
-                if time.time() - start_time > time_limit:
-                    return max_eval  # Timeout, return current best
-                new_state = self.search_problem.transition(state, action)
-                eval = self.alphabeta_with_timeout(new_state, depth - 1, alpha, beta, False, start_time, time_limit)
-                max_eval = max(max_eval, eval)
-                alpha = max(alpha, eval)
+                child = self.search_problem.transition(state, action)
+                val = self._alphabeta(child, depth - 1, alpha, beta, False, deadline)
+                best = max(best, val)
+                alpha = max(alpha, val)
                 if beta <= alpha:
                     break
-            return max_eval
+            return best
         else:
-            min_eval = float('inf')
-            actions = self.search_problem.get_available_actions(state)
+            best = float('inf')
             for action in actions:
-                if time.time() - start_time > time_limit:
-                    return min_eval
-                new_state = self.search_problem.transition(state, action)
-                eval = self.alphabeta_with_timeout(new_state, depth - 1, alpha, beta, True, start_time, time_limit)
-                min_eval = min(min_eval, eval)
-                beta = min(beta, eval)
+                child = self.search_problem.transition(state, action)
+                val = self._alphabeta(child, depth - 1, alpha, beta, True, deadline)
+                best = min(best, val)
+                beta = min(beta, val)
                 if beta <= alpha:
                     break
-            return min_eval
+            return best
 
     def get_move(self, game_state: GoState, time_limit: float) -> Action:
         """
-        Get move of agent for given game state using iterative deepening algorithm (+ alpha-beta).
+        Iterative deepening search using alpha-beta.
+
+        Searches at increasing depths until the deadline is reached.  If the
+        current depth finishes, the result becomes the new best move.  If time
+        runs out mid-depth, the best move from the previous completed depth is
+        returned.
         """
-        start_time = time.time()
+        # Reserve a small safety margin so we never exceed the hard limit.
+        deadline = time.time() + time_limit * 0.9
+
         is_maximizing = (game_state.player_to_move() == MAXIMIZER)
-        best_action = None
+
+        # Initialise to a legal move so we always return something.
+        actions = self.search_problem.get_available_actions(game_state)
+        best_action = actions[0] if actions else None
+
         depth = 1
-        
-        # Allocate ~90% of time for search, reserve 10% for overhead
-        search_time_limit = time_limit * 0.9
-        
-        while True:
-            # Check if we have time for another iteration
-            elapsed = time.time() - start_time
-            if elapsed > search_time_limit:
-                break
-            
-            # Run alpha-beta at current depth
-            best_value = -float('inf') if is_maximizing else float('inf')
-            current_best = None
+        while time.time() < deadline:
+            current_best_action = None
+            current_best_value = -float('inf') if is_maximizing else float('inf')
             alpha = -float('inf')
             beta = float('inf')
-            
-            actions = self.search_problem.get_available_actions(game_state)
-            random.shuffle(actions)
-            
-            for action in actions:
-                # Check timeout before evaluating each action
-                if time.time() - start_time > search_time_limit:
-                    break
-                    
-                new_state = self.search_problem.transition(game_state, action)
-                value = self.alphabeta_with_timeout(
-                    new_state, depth - 1, alpha, beta, not is_maximizing, 
-                    start_time, search_time_limit - (time.time() - start_time)
-                )
-                
-                if is_maximizing:
-                    if value > best_value:
-                        best_value = value
-                        current_best = action
-                    alpha = max(alpha, value)
-                else:
-                    if value < best_value:
-                        best_value = value
-                        current_best = action
-                    beta = min(beta, value)
-            
-            if current_best is not None:
-                best_action = current_best
-            
-            depth += 1
-            # Safety: don't go too deep
-            if depth > 10:
+
+            try:
+                shuffled = list(actions)
+                random.shuffle(shuffled)
+
+                for action in shuffled:
+                    if time.time() >= deadline:
+                        break
+                    child = self.search_problem.transition(game_state, action)
+                    val = self._alphabeta(
+                        child, depth - 1, alpha, beta, not is_maximizing, deadline
+                    )
+
+                    if is_maximizing:
+                        if val > current_best_value:
+                            current_best_value = val
+                            current_best_action = action
+                        alpha = max(alpha, val)
+                    else:
+                        if val < current_best_value:
+                            current_best_value = val
+                            current_best_action = action
+                        beta = min(beta, val)
+
+                # Depth completed without timeout — commit the result.
+                if current_best_action is not None:
+                    best_action = current_best_action
+
+            except _Timeout:
+                # Ran out of time mid-depth; keep the last fully-completed result.
                 break
-        
+
+            depth += 1
+
         return best_action
 
     def __str__(self):
-        return f"IterativeDeepening + " + str(self.search_problem)
+        return "IterativeDeepening + " + str(self.search_problem)
 
+
+################################################
+#
+# Part 2B: Monte Carlo Tree Search
+#
+################################################
 
 class MCTSNode:
-    def __init__(self, state, parent=None, children=None, action=None):
+    """A node in the MCTS search tree."""
+
+    def __init__(self, state: GoState, parent=None, action=None):
         self.state = state
         self.parent = parent
-        if children is None:
-            children = []
-        self.children = children
-        self.visits = 0
-        self.value = 0
-        self.action = action
-        self.untried_actions = None
+        self.action = action      # action taken from parent to reach this node
+        self.children: List['MCTSNode'] = []
+        self.visits: int = 0
+        self.value: int = 0       # wins for the player who MOVED to reach this node
+
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
+
+    def is_terminal(self) -> bool:
+        return self.state.is_terminal_state()
 
     def __hash__(self):
-        return hash(str(self.state))  # Simple hashing for state
+        return hash(str(self.state))
 
 
 class MCTSAgent(GameAgent):
-    def __init__(self, c=np.sqrt(2)):
+    def __init__(self, c: float = np.sqrt(2)):
         """
-        Args: 
-            c (float): exploration constant of UCT algorithm
+        Args:
+            c: UCT exploration constant (higher → more exploration).
         """
         super().__init__()
         self.c = c
         self.search_problem = GoProblem()
-    
-    def select(self, node):
-        """Select a child node using UCT formula."""
-        total_visits = node.visits
-        best_child = None
-        best_uct = -float('inf')
-        
-        for child in node.children:
-            if child.visits == 0:
-                return child
-            exploitation = child.value / child.visits
-            exploration = self.c * np.sqrt(np.log(total_visits) / child.visits)
-            uct_value = exploitation + exploration
-            
-            if uct_value > best_uct:
-                best_uct = uct_value
-                best_child = child
-        
-        return best_child
-    
-    def expand(self, node):
-        """Expand a node by adding a new child."""
-        if node.untried_actions is None:
-            node.untried_actions = self.search_problem.get_available_actions(node.state)
-            random.shuffle(node.untried_actions)
-        
-        if node.untried_actions:
-            action = node.untried_actions.pop()
-            new_state = self.search_problem.transition(node.state, action)
-            child_node = MCTSNode(new_state, parent=node, action=action)
-            node.children.append(child_node)
-            return child_node
-        return None
-    
-    def simulate(self, state, max_depth=20):
-        """Simulate a random rollout from the given state."""
-        current_state = state.clone()
-        depth = 0
-        
-        while not self.search_problem.is_terminal_state(current_state) and depth < max_depth:
-            actions = self.search_problem.get_available_actions(current_state)
+
+    # ------------------------------------------------------------------
+    # UCT helper
+    # ------------------------------------------------------------------
+
+    def _uct(self, child: MCTSNode, parent_visits: int) -> float:
+        if child.visits == 0:
+            return float('inf')
+        exploitation = child.value / child.visits
+        exploration = self.c * np.sqrt(np.log(parent_visits) / child.visits)
+        return exploitation + exploration
+
+    # ------------------------------------------------------------------
+    # Four MCTS steps (exposed as methods per assignment spec)
+    # ------------------------------------------------------------------
+
+    def select(self, node: MCTSNode) -> MCTSNode:
+        """
+        SELECT: walk the tree using the UCT tree policy until a leaf node
+        (no children) is found, or a terminal node is encountered.
+        """
+        curr = node
+        while not curr.is_leaf():
+            if curr.is_terminal():
+                return curr
+            curr = max(curr.children, key=lambda c: self._uct(c, curr.visits))
+        return curr
+
+    def expand(self, leaf: MCTSNode) -> List[MCTSNode]:
+        """
+        EXPAND: add all legal children of *leaf* to the tree and return them.
+        If *leaf* is terminal, return [leaf] so we can still backpropagate.
+        """
+        if leaf.is_terminal():
+            return [leaf]
+
+        actions = self.search_problem.get_available_actions(leaf.state)
+        random.shuffle(actions)
+        children = []
+        for action in actions:
+            child_state = self.search_problem.transition(leaf.state, action)
+            child = MCTSNode(child_state, parent=leaf, action=action)
+            leaf.children.append(child)
+            children.append(child)
+        return children
+
+    def simulate(self, children: List[MCTSNode]) -> List[float]:
+        """
+        SIMULATE: run a random rollout from each child and return results.
+        Result is +1 (BLACK wins) or -1 (WHITE wins) from BLACK's perspective.
+
+        For efficiency, we run exactly one rollout per call (the first child).
+        All children were already added to the tree by expand(), so UCT will
+        direct future iterations to the unvisited siblings.  This gives O(depth)
+        per MCTS iteration rather than O(branching_factor * depth).
+        """
+        if not children:
+            return []
+        return [self._rollout(children[0].state)]
+
+    def _rollout(self, state: GoState) -> float:
+        """Random rollout to terminal; returns get_result() value."""
+        curr = state.clone()
+        while not self.search_problem.is_terminal_state(curr):
+            actions = self.search_problem.get_available_actions(curr)
             if not actions:
                 break
-            action = random.choice(actions)
-            current_state = self.search_problem.transition(current_state, action)
-            depth += 1
-        
-        # Get result from BLACK's perspective
-        if self.search_problem.is_terminal_state(current_state):
-            return self.search_problem.get_result(current_state)
-        else:
-            # Approximate value based on simple heuristic
-            simple_heuristic = GoProblemSimpleHeuristic()
-            return simple_heuristic.heuristic(current_state, 0)
-    
-    def backpropagate(self, node, result):
-        """Backpropagate the simulation result up the tree."""
-        while node is not None:
-            node.visits += 1
-            node.value += result
-            node = node.parent
-            # Flip result for opponent's perspective
-            result = -result
-    
+            curr = self.search_problem.transition(curr, random.choice(actions))
+        if self.search_problem.is_terminal_state(curr):
+            return self.search_problem.get_result(curr)
+        return 0.0
+
+    def backpropagate(self, results: List[float], children: List[MCTSNode]) -> None:
+        """
+        BACKPROPAGATE: walk from each child up to the root, updating visit
+        counts and win counts.
+
+        Value semantics (from pseudocode):
+          - result == -1 (WHITE wins) and node.player_to_move() == BLACK (0):
+              WHITE was the one who moved to reach this node → increment value.
+          - result == +1 (BLACK wins) and node.player_to_move() == WHITE (1):
+              BLACK was the one who moved to reach this node → increment value.
+
+        This means child.value / child.visits = win-rate for the *parent*
+        who chose to play into this child, making UCT maximisation correct for
+        both players.
+        """
+        for child, result in zip(children, results):
+            curr = child
+            while curr is not None:
+                curr.visits += 1
+                player = curr.state.player_to_move()
+                # Increment when the player who moved HERE (opponent of player)
+                # is the one who won.
+                if result == -1 and player == 0:   # WHITE wins; WHITE moved here
+                    curr.value += 1
+                elif result == 1 and player == 1:  # BLACK wins; BLACK moved here
+                    curr.value += 1
+                curr = curr.parent
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
     def get_move(self, game_state: GoState, time_limit: float) -> Action:
         """
-        Get move of agent for given game state using MCTS algorithm
+        Run MCTS for up to *time_limit* seconds and return the action
+        corresponding to the root child with the highest visit count.
         """
         root = MCTSNode(game_state.clone())
-        root.untried_actions = self.search_problem.get_available_actions(game_state)
-        start_time = time.time()
-        
-        num_iterations = 0
-        while time.time() - start_time < time_limit * 0.95:  # Leave a small buffer
-            node = root
-            
-            # Selection
-            while node.untried_actions is None and node.children:
-                node = self.select(node)
-            
-            # Expansion
-            if node.untried_actions is not None and node.untried_actions:
-                node = self.expand(node)
-            
-            # Simulation
-            if node is not None:
-                result = self.simulate(node.state)
-                
-                # Backpropagation
-                self.backpropagate(node, result)
-            
-            num_iterations += 1
-            
-            # Early stopping if we've done enough iterations
-            if num_iterations > 1000 and root.visits > 0:
-                # Check if we have a clear best move
-                best_visits = max(child.visits for child in root.children) if root.children else 0
-                if best_visits > root.visits * 0.8:
-                    break
-        
-        # Select best action based on highest visit count
+        deadline = time.time() + time_limit * 0.90
+
+        while time.time() < deadline:
+            # 1. Select a leaf
+            leaf = self.select(root)
+
+            # 2. Expand the leaf (add all children)
+            children = self.expand(leaf)
+
+            # 3. Simulate a rollout from the first new child
+            results = self.simulate(children)
+
+            # 4. Backpropagate the result (only for simulated children)
+            self.backpropagate(results, children[:len(results)])
+
+        # Return the root child with the most visits (lowest variance estimate).
         if root.children:
-            best_child = max(root.children, key=lambda c: c.visits)
-            return best_child.action
-        
-        # Fallback to random move
+            return max(root.children, key=lambda c: c.visits).action
+
+        # Fallback (should rarely happen)
         actions = self.search_problem.get_available_actions(game_state)
         return random.choice(actions)
 
     def __str__(self):
-        return "MCTS"
+        return f"MCTS(c={self.c:.2f})"
+
+
+###################################################
+#
+# Part 1 Phase 2 helper: construct a learned-heuristic agent from saved model
+#
+###################################################
+
+def create_value_agent_from_model(model_path: str = "value_model.pt",
+                                   board_size: int = 5) -> 'AlphaBetaAgent':
+    """
+    Load the saved ValueNetwork and return an AlphaBetaAgent that uses the
+    learned value function as its heuristic.
+    """
+    # Feature size: 3 * board_size^2 (black/white/empty) + 1 (player) + 4 (extra)
+    feature_size = 3 * board_size * board_size + 1 + 4
+    model = ValueNetwork(input_size=feature_size)
+    try:
+        model = load_model(model_path, model)
+    except Exception:
+        pass  # Use untrained model as fallback if file is missing
+    model.eval()
+
+    search_problem = GoProblemLearnedHeuristic(model=model, size=board_size)
+    return AlphaBetaAgent(depth_cutoff=2, search_problem=search_problem)
 
 
 ###################################################
@@ -499,7 +563,6 @@ class MCTSAgent(GameAgent):
 
 def get_final_agent_5x5():
     """Called to construct agent for final submission for 5x5 board"""
-    # Use MCTS with learned heuristic for best performance
     return MCTSAgent(c=1.0)
 
 def get_final_agent_9x9():
