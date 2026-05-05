@@ -422,10 +422,10 @@ class MCTSAgent(GameAgent):
         return curr
 
     def expand(self, leaf: MCTSNode) -> List[MCTSNode]:
-        """EXPAND: add all legal children of *leaf* to the tree."""
-        # FIX: Return empty list for terminal nodes (not [leaf])
+        """EXPAND: add all legal children of *leaf* to the tree.
+        Returns [leaf] for terminal nodes so the result is backpropagated."""
         if leaf.is_terminal():
-            return []
+            return [leaf]
 
         actions = self.search_problem.get_available_actions(leaf.state)
         random.shuffle(actions)
@@ -513,7 +513,7 @@ class MCTSAgent(GameAgent):
             # 2. Expand the leaf (add all children)
             children = self.expand(leaf)
 
-            # 3. Simulate a rollout from the first new child
+            # 3. Simulate a rollout from each child (terminal leaf returns [leaf])
             results = self.simulate(children)
 
             # 4. Backpropagate the result (only for simulated children)
@@ -585,6 +585,18 @@ class FinalAgent(GameAgent):
         self.search_problem = GoProblem()
         self._simple_heuristic = GoProblemSimpleHeuristic()
         self._root: Optional[MCTSNode] = None
+        # Try to load the trained value network for leaf evaluation
+        self._value_model = None
+        self._learned_heuristic = None
+        try:
+            feature_size = 3 * 25 + 1 + 4  # 5x5 board
+            _model = ValueNetwork(input_size=feature_size)
+            _model = load_model("value_model.pt", _model)
+            _model.eval()
+            self._value_model = _model
+            self._learned_heuristic = GoProblemLearnedHeuristic(model=_model)
+        except Exception:
+            pass
 
     def reset(self):
         self._root = None
@@ -630,6 +642,21 @@ class FinalAgent(GameAgent):
                     score -= len(region)
 
         return score / (size * size)
+
+    # ------------------------------------------------------------------
+    # Leaf evaluation (value network if available, else rollout)
+    # ------------------------------------------------------------------
+
+    def _evaluate_leaf(self, state: GoState) -> float:
+        """Evaluate a leaf state. Uses value network if loaded, else rollout."""
+        if self.search_problem.is_terminal_state(state):
+            return self.search_problem.get_result(state)
+        if self._value_model is not None and self._learned_heuristic is not None:
+            try:
+                return self._learned_heuristic.heuristic(state, 0)
+            except Exception:
+                pass
+        return self._rollout(state)
 
     # ------------------------------------------------------------------
     # Rollout
@@ -702,10 +729,12 @@ class FinalAgent(GameAgent):
             curr.visits += 1
             if not curr.state.is_terminal_state():
                 player = curr.state.player_to_move()
-                if result == -1 and player == 0:
-                    curr.value += 1
-                elif result == 1 and player == 1:
-                    curr.value += 1
+                # value = sum of results from the perspective of the player who
+                # moved INTO this node. player_to_move==1 means BLACK just moved.
+                if player == 1:
+                    curr.value += result        # positive when BLACK wins
+                else:
+                    curr.value += -result       # positive when WHITE wins
             curr = curr.parent
 
     # ------------------------------------------------------------------
@@ -749,11 +778,16 @@ class FinalAgent(GameAgent):
             leaf = self._select(root)
             children = self._expand(leaf)
             if not children:
+                # Terminal leaf: backpropagate its result so UCT becomes finite
+                # and the leaf is not re-selected every iteration.
+                if leaf.is_terminal():
+                    result = self.search_problem.get_result(leaf.state)
+                    self._backpropagate(leaf, result)
                 continue
             # Prefer an unvisited child for the rollout.
             unvisited = [ch for ch in children if ch.visits == 0]
             target = random.choice(unvisited) if unvisited else children[0]
-            result = self._rollout(target.state)
+            result = self._evaluate_leaf(target.state)
             self._backpropagate(target, result)
 
         self._root = root
