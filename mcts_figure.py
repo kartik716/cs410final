@@ -1,129 +1,133 @@
 """
 Generate a figure illustrating how the MCTS agent makes decisions.
-
-The figure shows two side-by-side heatmaps of root-child visit counts on a
-5×5 board, one after 0.1 s of search and another after 1.0 s of search.
-Darker cells = more simulations through that move.  The heatmaps let us see
-which regions of the board MCTS considers most promising and how much the
-distribution sharpens with additional search time.
 """
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import time
+import random
 
 from go_search_problem import GoProblem, GoState
 from agents import MCTSAgent, MCTSNode
 
 
-def build_visit_heatmap(game_state: GoState, search_time: float,
-                         board_size: int = 5, c: float = np.sqrt(2)) -> np.ndarray:
-    """
-    Run MCTS for *search_time* seconds and return a (board_size, board_size)
-    array of visit counts for each root child.  Pass-move visits are ignored.
-    """
+def run_mcts_and_get_visits(state: GoState, search_time: float, c: float = np.sqrt(2)):
+    """Run MCTS and return visit counts and win rates for root children."""
+    
+    # Create a fresh MCTS agent
     agent = MCTSAgent(c=c)
-    # Build the tree manually so we can inspect root.children afterwards.
-    import time
-    root = MCTSNode(game_state.clone())
+    
+    # Manually run the MCTS loop (same as agent.get_move but we keep the tree)
+    root = MCTSNode(state.clone())
     deadline = time.time() + search_time
-
-    while time.time() < deadline:
+    
+    iterations = 0
+    while time.time() < deadline and iterations < 1000:
+        # Selection
         leaf = agent.select(root)
+        
+        # Expansion
         children = agent.expand(leaf)
-        results = agent.simulate(children)
-        agent.backpropagate(results, children[:len(results)])
-
-    heatmap = np.zeros((board_size, board_size))
-    pass_action = board_size * board_size
-    for child in root.children:
-        if child.action != pass_action:
-            row = child.action // board_size
-            col = child.action % board_size
-            heatmap[row, col] = child.visits
-    return heatmap
-
-
-def build_visit_heatmap_wins(game_state: GoState, search_time: float,
-                              board_size: int = 5, c: float = np.sqrt(2)) -> np.ndarray:
-    """Return win-rate heatmap (wins / visits) for root children."""
-    import time
-    agent = MCTSAgent(c=c)
-    root = MCTSNode(game_state.clone())
-    deadline = time.time() + search_time
-
-    while time.time() < deadline:
-        leaf = agent.select(root)
-        children = agent.expand(leaf)
-        results = agent.simulate(children)
-        agent.backpropagate(results, children[:len(results)])
-
-    heatmap = np.full((board_size, board_size), np.nan)
+        
+        # Simulation
+        if children:
+            results = agent.simulate(children)
+            # Backpropagation
+            agent.backpropagate(results, children)
+        
+        iterations += 1
+    
+    # Extract visit counts and win rates from root children
+    board_size = state.size
+    visits = np.zeros((board_size, board_size))
+    win_rates = np.zeros((board_size, board_size))
+    
     pass_action = board_size * board_size
     for child in root.children:
         if child.action != pass_action and child.visits > 0:
             row = child.action // board_size
             col = child.action % board_size
-            heatmap[row, col] = child.value / child.visits
-    return heatmap
+            visits[row, col] = child.visits
+            win_rates[row, col] = child.value / child.visits
+    
+    return visits, win_rates, iterations
 
 
 def main():
     board_size = 5
     game = GoProblem(size=board_size)
     state = game.start_state
-
+    
+    # Set random seed for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    
     times = [0.1, 1.0]
-    heatmaps = [build_visit_heatmap(state, t, board_size) for t in times]
-    win_heatmaps = [build_visit_heatmap_wins(state, t, board_size) for t in times]
-
-    fig, axes = plt.subplots(2, 2, figsize=(10, 9))
-    fig.suptitle("MCTS Decision Analysis on 5×5 Go (Initial Board State)",
+    c_value = 1.414  # sqrt(2)
+    
+    # Collect data
+    visit_maps = []
+    win_maps = []
+    
+    for t in times:
+        print(f"Running MCTS for {t}s...")
+        visits, wins, iters = run_mcts_and_get_visits(state, t, c_value)
+        visit_maps.append(visits)
+        win_maps.append(wins)
+        print(f"  Completed {iters} iterations")
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle("MCTS Decision Analysis on 5x5 Go (Initial Board State)",
                  fontsize=14, fontweight="bold")
-
-    titles_visits = [f"Visit counts after {t}s" for t in times]
-    titles_wins   = [f"Win-rate after {t}s" for t in times]
-
-    for col, (visits, wins, tv, tw) in enumerate(
-            zip(heatmaps, win_heatmaps, titles_visits, titles_wins)):
-
-        # Visit-count heatmap
-        ax = axes[0][col]
-        im = ax.imshow(visits, cmap="YlOrRd", vmin=0, aspect="equal")
-        ax.set_title(tv, fontsize=12)
-        ax.set_xticks(range(board_size))
-        ax.set_yticks(range(board_size))
-        ax.set_xticklabels(range(board_size))
-        ax.set_yticklabels(range(board_size))
-        # Annotate with visit counts
+    
+    for col, (t, visits, wins) in enumerate(zip(times, visit_maps, win_maps)):
+        
+        # Visit count heatmap (top row)
+        ax = axes[0, col]
+        im = ax.imshow(visits, cmap="YlOrRd", aspect="equal")
+        ax.set_title(f"Visit counts after {t}s", fontsize=12)
+        ax.set_xlabel("Column")
+        ax.set_ylabel("Row")
+        
+        # Add text labels
         for r in range(board_size):
-            for c_ in range(board_size):
-                v = int(visits[r, c_])
-                ax.text(c_, r, str(v), ha="center", va="center",
-                        fontsize=8, color="black" if v < visits.max() * 0.6 else "white")
-        plt.colorbar(im, ax=ax, label="Visits")
-
-        # Win-rate heatmap
-        ax2 = axes[1][col]
-        masked = np.ma.array(wins, mask=np.isnan(wins))
-        im2 = ax2.imshow(masked, cmap="RdYlGn", vmin=0, vmax=1, aspect="equal")
-        ax2.set_title(tw, fontsize=12)
-        ax2.set_xticks(range(board_size))
-        ax2.set_yticks(range(board_size))
-        ax2.set_xticklabels(range(board_size))
-        ax2.set_yticklabels(range(board_size))
+            for c in range(board_size):
+                v = int(visits[r, c])
+                if v > 0:
+                    text_color = "white" if v > visits.max() * 0.6 else "black"
+                    ax.text(c, r, str(v), ha="center", va="center", fontsize=9, color=text_color)
+        
+        plt.colorbar(im, ax=ax, label="Number of visits")
+        
+        # Win rate heatmap (bottom row)
+        ax2 = axes[1, col]
+        im2 = ax2.imshow(wins, cmap="RdYlGn", vmin=0, vmax=1, aspect="equal")
+        ax2.set_title(f"Win rate after {t}s (for Black)", fontsize=12)
+        ax2.set_xlabel("Column")
+        ax2.set_ylabel("Row")
+        
+        # Add text labels
         for r in range(board_size):
-            for c_ in range(board_size):
-                if not np.isnan(wins[r, c_]):
-                    ax2.text(c_, r, f"{wins[r,c_]:.2f}", ha="center", va="center",
-                             fontsize=7)
-        plt.colorbar(im2, ax=ax2, label="Win-rate (for Black)")
-
+            for c in range(board_size):
+                w = wins[r, c]
+                if w > 0:
+                    ax2.text(c, r, f"{w:.2f}", ha="center", va="center", fontsize=8)
+        
+        plt.colorbar(im2, ax=ax2, label="Win rate")
+    
     plt.tight_layout()
-    out = "mcts_analysis.png"
-    plt.savefig(out, dpi=120, bbox_inches="tight")
-    print(f"Figure saved to {out}")
+    plt.savefig("mcts_analysis.png", dpi=150, bbox_inches="tight")
+    print("Figure saved to mcts_analysis.png")
+    
+    # Print summary statistics
+    print("\nSummary:")
+    for t, visits in zip(times, visit_maps):
+        total_visits = np.sum(visits)
+        nonzero = np.count_nonzero(visits)
+        print(f"  {t}s: {total_visits} total visits across {nonzero} positions")
 
 
 if __name__ == "__main__":
