@@ -364,6 +364,7 @@ def create_agent(agent_type: str, **kwargs) -> Any:
         'ids': lambda: IterativeDeepeningAgent(),
         'learned': lambda: create_value_agent_from_model(),
         'mcts': lambda: MCTSAgent(),
+        'final': lambda: get_final_agent_5x5(),
         # Add more agents as needed for part 3
     }
     
