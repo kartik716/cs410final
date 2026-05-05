@@ -425,7 +425,7 @@ class MCTSAgent(GameAgent):
         """EXPAND: add all legal children of *leaf* to the tree."""
         # FIX: Return empty list for terminal nodes (not [leaf])
         if leaf.is_terminal():
-            return []  # ← Change this from [leaf] to []
+            return []
 
         actions = self.search_problem.get_available_actions(leaf.state)
         random.shuffle(actions)
@@ -438,18 +438,16 @@ class MCTSAgent(GameAgent):
         return children
 
     def simulate(self, children: List[MCTSNode]) -> List[float]:
-        """
-        SIMULATE: run a random rollout from each child and return results.
-        Result is +1 (BLACK wins) or -1 (WHITE wins) from BLACK's perspective.
-
-        For efficiency, we run exactly one rollout per call (the first child).
-        All children were already added to the tree by expand(), so UCT will
-        direct future iterations to the unvisited siblings.  This gives O(depth)
-        per MCTS iteration rather than O(branching_factor * depth).
-        """
+        """Run a random rollout from each child and return results."""
         if not children:
             return []
-        return [self._rollout(children[0].state)]
+        results = []
+        for child in children:
+            if self.search_problem.is_terminal_state(child.state):
+                results.append(self.search_problem.get_result(child.state))
+            else:
+                results.append(self._rollout(child.state))
+        return results
 
     def _rollout(self, state: GoState) -> float:
         """Random rollout to terminal; returns get_result() value."""
@@ -519,7 +517,7 @@ class MCTSAgent(GameAgent):
             results = self.simulate(children)
 
             # 4. Backpropagate the result (only for simulated children)
-            self.backpropagate(results, children[:len(results)])
+            self.backpropagate(results, children)
 
         # Return the root child with the most visits (lowest variance estimate).
         if root.children:
