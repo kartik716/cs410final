@@ -455,6 +455,10 @@ class MCTSAgent(GameAgent):
 
     def _rollout(self, state: GoState) -> float:
         """Random rollout to terminal; returns get_result() value."""
+        # Guard: do not clone a terminal state — observation_tensor() without a
+        # player argument calls current_player() in C++, which asserts >= 0.
+        if self.search_problem.is_terminal_state(state):
+            return self.search_problem.get_result(state)
         curr = state.clone()
         while not self.search_problem.is_terminal_state(curr):
             actions = self.search_problem.get_available_actions(curr)
@@ -484,13 +488,14 @@ class MCTSAgent(GameAgent):
             curr = child
             while curr is not None:
                 curr.visits += 1
-                player = curr.state.player_to_move()
-                # Increment when the player who moved HERE (opponent of player)
-                # is the one who won.
-                if result == -1 and player == 0:   # WHITE wins; WHITE moved here
-                    curr.value += 1
-                elif result == 1 and player == 1:  # BLACK wins; BLACK moved here
-                    curr.value += 1
+                # Skip player_to_move() on terminal nodes to avoid passing
+                # kTerminalPlayerId (-4) into any downstream C++ assertion.
+                if not curr.state.is_terminal_state():
+                    player = curr.state.player_to_move()
+                    if result == -1 and player == 0:   # WHITE wins; WHITE moved here
+                        curr.value += 1
+                    elif result == 1 and player == 1:  # BLACK wins; BLACK moved here
+                        curr.value += 1
                 curr = curr.parent
 
     # ------------------------------------------------------------------
@@ -561,10 +566,215 @@ def create_value_agent_from_model(model_path: str = "value_model.pt",
 #
 ###################################################
 
+class FinalAgent(GameAgent):
+    """
+    Enhanced MCTS agent for the final competition.
+
+    Improvements over the base MCTSAgent:
+    - Heuristic rollouts: passes are avoided; a light territory flood-fill
+      breaks score ties and helps rollouts converge faster.
+    - Tree reuse: the MCTS tree is carried over between moves so the agent
+      builds on prior work.
+    - Opening book: the center is always the best first move on a 5x5 board,
+      so we skip search entirely for that case.
+    - Safer terminal-state handling (same fix as MCTSAgent above).
+    """
+
+    # On a 5x5 board action 12 = position (2,2), the centre.
+    _OPENING_BOOK_5x5 = {0: 12}   # {stones_on_board: action}
+
+    def __init__(self, c: float = 1.4):
+        super().__init__()
+        self.c = c
+        self.search_problem = GoProblem()
+        self._simple_heuristic = GoProblemSimpleHeuristic()
+        self._root: Optional[MCTSNode] = None
+
+    def reset(self):
+        self._root = None
+
+    # ------------------------------------------------------------------
+    # Territory estimation (flood-fill)
+    # ------------------------------------------------------------------
+
+    def _territory_score(self, state: GoState) -> float:
+        """Returns (black_territory - white_territory) / board_area."""
+        board = state.get_board()
+        black, white, empty = board[0], board[1], board[2]
+        size = state.size
+        visited = [[False] * size for _ in range(size)]
+        score = 0.0
+
+        for r in range(size):
+            for c in range(size):
+                if visited[r][c] or not empty[r][c]:
+                    continue
+                # BFS over connected empty region
+                region, q = [], [(r, c)]
+                visited[r][c] = True
+                border_b = border_w = False
+                while q:
+                    yr, yc = q.pop()
+                    region.append((yr, yc))
+                    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        nr, nc = yr + dr, yc + dc
+                        if not (0 <= nr < size and 0 <= nc < size):
+                            continue
+                        if not visited[nr][nc]:
+                            if empty[nr][nc]:
+                                visited[nr][nc] = True
+                                q.append((nr, nc))
+                            elif black[nr][nc]:
+                                border_b = True
+                            elif white[nr][nc]:
+                                border_w = True
+                if border_b and not border_w:
+                    score += len(region)
+                elif border_w and not border_b:
+                    score -= len(region)
+
+        return score / (size * size)
+
+    # ------------------------------------------------------------------
+    # Rollout
+    # ------------------------------------------------------------------
+
+    def _rollout(self, state: GoState) -> float:
+        if self.search_problem.is_terminal_state(state):
+            return self.search_problem.get_result(state)
+        curr = state.clone()
+        pass_action = curr.size * curr.size   # the pass action index
+        max_steps = curr.size * curr.size * 3
+        steps = 0
+
+        while not self.search_problem.is_terminal_state(curr) and steps < max_steps:
+            actions = self.search_problem.get_available_actions(curr)
+            if not actions:
+                break
+            # Lightly prefer non-pass moves; with 20 % chance pick random.
+            non_pass = [a for a in actions if a != pass_action]
+            if non_pass and random.random() < 0.8:
+                action = random.choice(non_pass)
+            else:
+                action = random.choice(actions)
+            curr = self.search_problem.transition(curr, action)
+            steps += 1
+
+        if self.search_problem.is_terminal_state(curr):
+            return self.search_problem.get_result(curr)
+        # Heuristic evaluation at depth limit
+        black = len(curr.get_pieces_coordinates(0))
+        white = len(curr.get_pieces_coordinates(1))
+        stone = (black - white) / (curr.size * curr.size)
+        territory = self._territory_score(curr)
+        raw = 0.5 * stone + 0.5 * territory
+        return max(-1.0, min(1.0, raw))
+
+    # ------------------------------------------------------------------
+    # MCTS primitives
+    # ------------------------------------------------------------------
+
+    def _uct(self, child: MCTSNode, parent_visits: int) -> float:
+        if child.visits == 0:
+            return float('inf')
+        return (child.value / child.visits) + self.c * np.sqrt(np.log(parent_visits) / child.visits)
+
+    def _select(self, node: MCTSNode) -> MCTSNode:
+        curr = node
+        while not curr.is_leaf():
+            if curr.is_terminal():
+                return curr
+            curr = max(curr.children, key=lambda ch: self._uct(ch, curr.visits))
+        return curr
+
+    def _expand(self, leaf: MCTSNode) -> List[MCTSNode]:
+        if leaf.is_terminal():
+            return [leaf]
+        actions = self.search_problem.get_available_actions(leaf.state)
+        random.shuffle(actions)
+        children = []
+        for action in actions:
+            child_state = self.search_problem.transition(leaf.state, action)
+            child = MCTSNode(child_state, parent=leaf, action=action)
+            leaf.children.append(child)
+            children.append(child)
+        return children
+
+    def _backpropagate(self, node: MCTSNode, result: float) -> None:
+        curr = node
+        while curr is not None:
+            curr.visits += 1
+            if not curr.state.is_terminal_state():
+                player = curr.state.player_to_move()
+                if result == -1 and player == 0:
+                    curr.value += 1
+                elif result == 1 and player == 1:
+                    curr.value += 1
+            curr = curr.parent
+
+    # ------------------------------------------------------------------
+    # Tree reuse
+    # ------------------------------------------------------------------
+
+    def _reuse_tree(self, game_state: GoState) -> MCTSNode:
+        """Return the subtree rooted at game_state if found, else a fresh node."""
+        state_str = str(game_state)
+        if self._root is not None:
+            # Search two levels deep (our last move + opponent's response).
+            for child in self._root.children:
+                if str(child.state) == state_str:
+                    child.parent = None
+                    return child
+                for grandchild in child.children:
+                    if str(grandchild.state) == state_str:
+                        grandchild.parent = None
+                        return grandchild
+        return MCTSNode(game_state.clone())
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
+    def get_move(self, game_state: GoState, time_limit: float) -> Action:
+        # Opening book: play centre on the very first move.
+        board = game_state.get_board()
+        stones_on_board = int(board[0].sum() + board[1].sum())
+        if stones_on_board in self._OPENING_BOOK_5x5:
+            candidate = self._OPENING_BOOK_5x5[stones_on_board]
+            actions = self.search_problem.get_available_actions(game_state)
+            if candidate in actions:
+                self._root = None
+                return candidate
+
+        root = self._reuse_tree(game_state)
+        deadline = time.time() + time_limit * 0.90
+
+        while time.time() < deadline:
+            leaf = self._select(root)
+            children = self._expand(leaf)
+            if not children:
+                continue
+            # Prefer an unvisited child for the rollout.
+            unvisited = [ch for ch in children if ch.visits == 0]
+            target = random.choice(unvisited) if unvisited else children[0]
+            result = self._rollout(target.state)
+            self._backpropagate(target, result)
+
+        self._root = root
+
+        if root.children:
+            return max(root.children, key=lambda ch: ch.visits).action
+        actions = self.search_problem.get_available_actions(game_state)
+        return random.choice(actions) if actions else None
+
+    def __str__(self):
+        return f"FinalAgent(c={self.c:.2f})"
+
+
 def get_final_agent_5x5():
     """Called to construct agent for final submission for 5x5 board"""
-    return MCTSAgent(c=1.0)
+    return FinalAgent(c=1.4)
 
 def get_final_agent_9x9():
     """Called to construct agent for final submission for 9x9 board"""
-    return MCTSAgent(c=1.0)
+    return FinalAgent(c=1.4)
